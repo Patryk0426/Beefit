@@ -1,0 +1,53 @@
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background-color: #f4f6f8;
+  color: #333;
+}
+
+.app-container {
+  max-width: 800px;
+  margin: 40px auto;
+  padding: 20px;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+}
+
+.app-header {
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+.search-section form {
+  display: flex;
+  gap: 10px;
+}
+
+.search-section input {
+  flex: 1;
+  padding: 10px;
+  font-size: 16px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.search-section button {
+  padding: 10px 20px;
+  font-size: 16px;
+  background-color: #2e7d32;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.product-list {
+  list-style: none;
+  padding: 0;
+}
+
+.product-item {
+  border-bottom: 1px solid #eee;
+  padding: 10px 0;
+}

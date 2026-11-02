@@ -1,126 +1,206 @@
-const express = require('express');
-const cors = require('cors');
-const { PrismaClient } = require('@prisma/client');
-const axios = require('axios');
+
+require("dotenv").config({
+  path: require("path").join(__dirname, "../.env"),
+});
+
+const express = require("express");
+const cors = require("cors");
+const axios = require("axios");
 
 const app = express();
-const prisma = new PrismaClient();
 
 app.use(cors());
 app.use(express.json());
 
-// Pomocnicza funkcja do czyszczenia danych z API
-function cleanAndParseProductData(rawProduct) {
-    const nutriments = rawProduct.nutriments || {};
-    return {
-        barcode: rawProduct.code || null,
-        name: rawProduct.product_name_pl || rawProduct.product_name || 'Nieznany produkt',
-        caloriesPer100g: parseFloat(nutriments['energy-kcal_100g'] || nutriments['energy-kcal'] || 0),
-        proteinPer100g: parseFloat(nutriments['proteins_100g'] || 0),
-        fatPer100g: parseFloat(nutriments['fat_100g'] || 0),
-        carbsPer100g: parseFloat(nutriments['carbohydrates_100g'] || 0),
-        allergens: rawProduct.allergens_tags ? rawProduct.allergens_tags.join(', ') : null
-    };
+const OFF = "https://world.openfoodfacts.org";
+
+let offCookies = "";
+let loginPromise = null;
+
+// =====================================
+// LOGOWANIE OPEN FOOD FACTS
+// =====================================
+
+async function loginOFF() {
+  const username = process.env.OFF_USERNAME;
+  const password = process.env.OFF_PASSWORD;
+
+  if (!username || !password) {
+    throw new Error(
+      "Brak OFF_USERNAME lub OFF_PASSWORD w pliku .env"
+    );
+  }
+
+  const response = await axios.post(
+    `${OFF}/cgi/session.pl`,
+    new URLSearchParams({
+      user_id: username,
+      password: password,
+    }).toString(),
+    {
+      timeout: 20000,
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "BeeFIT/1.0",
+      },
+      maxRedirects: 0,
+      validateStatus: (status) => status >= 200 && status < 400,
+    }
+  );
+
+  const cookies = response.headers["set-cookie"] || [];
+
+  if (!cookies.length) {
+    throw new Error(
+      "Open Food Facts nie zwrócił ciasteczka sesji."
+    );
+  }
+
+  offCookies = cookies
+    .map((cookie) => cookie.split(";")[0])
+    .join("; ");
+
+  console.log("Zalogowano do Open Food Facts.");
 }
 
-// GET /api/items - wyszukiwanie produktów (lokalnie + zabezpieczone Open Food Facts)
-app.get('/api/items', function(req, res) {
-    return (async function() {
-        try {
-            const { search } = req.query;
-            let products = [];
+async function ensureLogin() {
+  if (offCookies) return;
 
-            if (search) {
-                // 1. Szukamy lokalnie w bazie
-                products = await prisma.product.findMany({
-                    where: { name: { contains: search, mode: 'insensitive' } },
-                    take: 50
-                });
+  if (!loginPromise) {
+    loginPromise = loginOFF().finally(() => {
+      loginPromise = null;
+    });
+  }
 
-                // 2. Jeśli lokalnie nic nie ma, próbujemy pytać Open Food Facts
-                if (products.length === 0 && search.trim() !== '') {
-                    try {
-                        const searchResponse = await axios.get(
-                            `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(search)}&search_simple=1&action=process&json=1`, 
-                            { 
-                                timeout: 4000,
-                                headers: {
-                                    'User-Agent': 'BeeFIT-App (contact@beefit.local)'
-                                }
-                            }
-                        );
-                        
-                        if (searchResponse.data && searchResponse.data.products && searchResponse.data.products.length > 0) {
-                            const rawProducts = searchResponse.data.products.slice(0, 5);
+  await loginPromise;
+}
 
-                            for (const raw of rawProducts) {
-                                const parsed = cleanAndParseProductData(raw);
-                                
-                                try {
-                                    const created = await prisma.product.create({
-                                        data: parsed
-                                    });
-                                    products.push(created);
-                                } catch (dbErr) {
-                                    if (parsed.barcode) {
-                                        const existingProd = await prisma.product.findUnique({ where: { barcode: parsed.barcode } });
-                                        if (existingProd && !products.some(p => p.id === existingProd.id)) {
-                                            products.push(existingProd);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } catch (apiErr) {
-                        // Zewnętrzne API Open Food Facts padło lub zwróciło 503 – logujemy łagodnie zamiast sypać błędami
-                        console.log('Informacja: Zewnętrzne API Open Food Facts jest obecnie niedostępne (503). Korzystamy z bazy lokalnej.');
-                    }
-                }
-            } else {
-                products = await prisma.product.findMany({ take: 50 });
-            }
+// =====================================
+// WYSZUKIWANIE PRODUKTÓW
+// =====================================
 
-            res.status(200).json({ success: true, data: products });
-        } catch (error) {
-            res.status(500).json({ success: false, error: 'Błąd serwera podczas pobierania produktów.' });
-        }
-    })();
-});
+app.get("/api/items", async (req, res) => {
+  try {
+    const search = String(req.query.search || "").trim();
 
-// POST /api/items - pobieranie danych z Open Food Facts za pomocą kodu kreskowego i zapis do bazy
-app.post('/api/items', async function(req, res) {
-    try {
-        const { barcode } = req.body;
-        if (!barcode) {
-            return res.status(400).json({ success: false, error: 'Wymagany jest kod kreskowy produktu.' });
-        }
-
-        const existing = await prisma.product.findUnique({ where: { barcode } });
-        if (existing) {
-            return res.status(200).json({ success: true, data: existing, message: 'Produkt już istnieje w bazie.' });
-        }
-
-        const apiResponse = await axios.get(`https://world.openfoodfacts.org/api/v0/product/${barcode}.json`, { 
-            timeout: 4000,
-            headers: {
-                'User-Agent': 'BeeFIT-App (contact@beefit.local)'
-            }
-        });
-        
-        if (!apiResponse.data || apiResponse.data.status !== 1) {
-            return res.status(404).json({ success: false, error: 'Nie znaleziono produktu w zewnętrznej bazie danych.' });
-        }
-
-        const parsedData = cleanAndParseProductData(apiResponse.data.product);
-        const newProduct = await prisma.product.create({ data: parsedData });
-
-        res.status(201).json({ success: true, data: newProduct });
-    } catch (error) {
-        res.status(500).json({ success: false, error: 'Zewnętrzne API jest obecnie przeciążone (503). Spróbuj ponownie później.' });
+    if (!search) {
+      return res.json([]);
     }
+
+    await ensureLogin();
+
+    const response = await axios.get(
+      `${OFF}/cgi/search.pl`,
+      {
+        params: {
+          search_terms: search,
+          search_simple: 1,
+          action: "process",
+          json: 1,
+          page_size: 100,
+          fields: [
+            "code",
+            "product_name",
+            "product_name_pl",
+            "brands",
+            "image_url",
+            "nutriments",
+            "allergens",
+            "countries_tags",
+          ].join(","),
+        },
+
+        timeout: 20000,
+
+        headers: {
+          "User-Agent": "BeeFIT/1.0",
+          Cookie: offCookies,
+        },
+      }
+    );
+
+    const rawProducts = response.data.products || [];
+
+    const products = rawProducts
+      .filter((product) => {
+        return product.product_name || product.product_name_pl;
+      })
+      .map((product) => {
+        const countries = product.countries_tags || [];
+
+        const isPolish = countries.some((country) =>
+          country.toLowerCase().includes("poland")
+        );
+
+        const nutriments = product.nutriments || {};
+
+        return {
+          barcode: product.code || "",
+
+          name:
+            product.product_name_pl ||
+            product.product_name ||
+            "Nieznany produkt",
+
+          originalName: product.product_name || "",
+
+          brand: product.brands || "",
+
+          image: product.image_url || "",
+
+          caloriesPer100g: Number(
+            nutriments["energy-kcal_100g"] || 0
+          ),
+
+          proteinPer100g: Number(
+            nutriments.proteins_100g || 0
+          ),
+
+          fatPer100g: Number(
+            nutriments.fat_100g || 0
+          ),
+
+          carbsPer100g: Number(
+            nutriments.carbohydrates_100g || 0
+          ),
+
+          allergens: product.allergens || "",
+
+          isPolish: isPolish,
+        };
+      });
+
+    // Polskie produkty na początku
+    products.sort((a, b) => {
+      return Number(b.isPolish) - Number(a.isPolish);
+    });
+
+    const finalProducts = products.slice(0, 20);
+
+    console.log(
+      `Wyszukiwanie "${search}": znaleziono ${finalProducts.length} produktów.`
+    );
+
+    return res.json(finalProducts);
+
+  } catch (error) {
+    console.error(
+      "BŁĄD WYSZUKIWANIA:",
+      error.response?.data || error.message
+    );
+
+    return res.status(500).json({
+      error: "Nie udało się wyszukać produktów.",
+    });
+  }
 });
+
+// =====================================
+// START SERWERA
+// =====================================
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, function() {
-    console.log(`Serwer backendowy BeeFIT działa na porcie ${PORT}`);
+
+app.listen(PORT, () => {
+  console.log(`BeeFIT działa na porcie ${PORT} 🚀`);
 });

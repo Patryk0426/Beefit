@@ -175,7 +175,7 @@ app.get("/api/items", async (req, res) => {
       return Number(b.isPolish) - Number(a.isPolish);
     });
 
-    const finalProducts = products.slice(0, 20);
+    const finalProducts = products.slice(0, 100);
 
     console.log(
       `Wyszukiwanie "${search}": znaleziono ${finalProducts.length} produktów.`
